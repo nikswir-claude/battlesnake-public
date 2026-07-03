@@ -15,8 +15,6 @@ pipeline, so the vector scored here is identical to the one trained on.
 import os
 from typing import Dict, List, Optional
 
-import numpy as np
-
 from features import (
     DIRECTIONS,
     FEATURE_NAMES,
@@ -32,15 +30,39 @@ HUNGRY_THRESHOLD = 50
 HEAD_TO_HEAD_PENALTY = 10_000
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model.txt")
 
-# Lazily-loaded LightGBM booster (None if unavailable -> heuristic fallback).
-_BOOSTER = None
-try:
-    import lightgbm as _lgb
+# The LightGBM booster and numpy are loaded LAZILY, on the first move, not at
+# import. Importing lightgbm/numpy and loading the model is slow on a small free
+# instance; doing it at worker boot made gunicorn miss Render's health check on
+# ``/``. Boot now stays light; ``warmup()`` (called from POST /start, which has
+# no move deadline) primes the model so the first real move is already fast.
+_BOOSTER = None          # loaded model, or None -> heuristic fallback
+_np = None               # cached numpy module
+_LOAD_FAILED = False     # remember a failed/absent load; don't retry every move
 
-    if os.path.exists(_MODEL_PATH):
-        _BOOSTER = _lgb.Booster(model_file=_MODEL_PATH)
-except Exception:  # noqa: BLE001 - model load must never break the server
-    _BOOSTER = None
+
+def _get_booster():
+    """Load and cache the booster on first use. Returns None on any failure."""
+    global _BOOSTER, _np, _LOAD_FAILED
+    if _BOOSTER is not None or _LOAD_FAILED:
+        return _BOOSTER
+    try:
+        import numpy as np
+        import lightgbm as lgb
+
+        if not os.path.exists(_MODEL_PATH):
+            _LOAD_FAILED = True
+            return None
+        _np = np
+        _BOOSTER = lgb.Booster(model_file=_MODEL_PATH)
+    except Exception:  # noqa: BLE001 - model load must never break the server
+        _LOAD_FAILED = True
+        _BOOSTER = None
+    return _BOOSTER
+
+
+def warmup() -> bool:
+    """Best-effort model preload (call from /start). True if the model is ready."""
+    return _get_booster() is not None
 
 
 def get_info() -> Dict[str, str]:
@@ -68,17 +90,18 @@ def choose_move(game_state: Dict) -> str:
 
 def choose_move_model(game_state: Dict) -> Optional[str]:
     """Score each legal move with the GBDT; return the best. None if unavailable."""
-    if _BOOSTER is None:
+    booster = _get_booster()
+    if booster is None:
         return None
     legal = _legal_moves(game_state)
     if not legal:
         return None
-    matrix = np.array(
+    matrix = _np.array(
         [[candidate_features(game_state, m)[n] for n in FEATURE_NAMES] for m in legal],
-        dtype=np.float32,
+        dtype=_np.float32,
     )
-    scores = _BOOSTER.predict(matrix)
-    return legal[int(np.argmax(scores))]
+    scores = booster.predict(matrix)
+    return legal[int(_np.argmax(scores))]
 
 
 def choose_move_heuristic(game_state: Dict) -> str:

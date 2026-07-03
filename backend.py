@@ -12,7 +12,7 @@ import os
 
 from flask import Flask, request
 
-from logic import choose_move, get_info
+from logic import choose_move, get_info, warmup
 
 app = Flask("battlesnake")
 
@@ -28,7 +28,9 @@ def on_info():
 @app.post("/start")
 def on_start():
     game_state = request.get_json()
-    log.info("GAME START %s", game_state["game"]["id"])
+    # Prime the model now (no per-move deadline here) so the first real move is fast.
+    ready = warmup()
+    log.info("GAME START %s (model ready=%s)", game_state["game"]["id"], ready)
     return "ok"
 
 
