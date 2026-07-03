@@ -1,0 +1,25 @@
+[
+  {
+    "label": "duel",
+    "games": 20,
+    "turns_mean": 179.8,
+    "turns_median": 161.0,
+    "turns_min": 18,
+    "turns_max": 617,
+    "draws": 1,
+    "per_snake": {
+      "A": {
+        "wins": 10,
+        "winrate": 0.5,
+        "draws": 1,
+        "avg_final_length": 17.7
+      },
+      "B": {
+        "wins": 9,
+        "winrate": 0.45,
+        "draws": 1,
+        "avg_final_length": 11.56
+      }
+    }
+  }
+]

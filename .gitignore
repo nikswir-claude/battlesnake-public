@@ -13,3 +13,6 @@ logs/
 *.log
 tools/_smoketest.json
 initial commit.txt
+CLAUDE.md
+TASK_CONTEXT.md
+PLAN.md
