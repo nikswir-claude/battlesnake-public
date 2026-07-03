@@ -1,2 +1,4 @@
 flask==3.0.3
 gunicorn==22.0.0
+# Serving needs no ML deps: the model is a pure-Python tree walk (model_py.json).
+# lightgbm/numpy are only needed to (re)train — see training/requirements-dev.txt.

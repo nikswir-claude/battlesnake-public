@@ -8,5 +8,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn backend:app --bind 0.0.0.0:$PORT
+    # One worker keeps memory low on the free instance; the model is loaded
+    # lazily (see logic.py), so boot stays fast enough for the health check.
+    startCommand: gunicorn backend:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
     healthCheckPath: /
