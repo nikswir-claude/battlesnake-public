@@ -10,7 +10,7 @@ from datetime import datetime
 # Импортируем логику из вашего проекта
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
-from logic import _candidate_features, _legal_moves, DIRECTIONS, choose_move_heuristic
+from logic import _candidate_features, _legal_moves, DIRECTIONS, choose_move_heuristic, _occupied_cells, _head_to_head_cells, _flood_fill, _in_bounds, _manhattan, HUNGRY_THRESHOLD, _BIG, _NEIGHBORS
 
 class DataCollector:
     """Собирает данные о ходах змейки для обучения модели."""
@@ -93,43 +93,11 @@ class DataCollector:
         return df
 
 
-def simulate_game(collector: DataCollector, game_id: int, 
-                  max_turns: int = 200, verbose: bool = False) -> float:
-    """Симулирует одну игру и собирает данные."""
-    # Простая симуляция — здесь нужна интеграция с реальной игрой
-    # В реальности вы будете использовать Battlesnake CLI или API
-    
-    from battlesnake import Game  # В реальности нужно подключить симулятор
-    
-    total_reward = 0
-    game = Game()  # Инициализация игры (заглушка)
-    
-    for turn in range(max_turns):
-        # Получаем текущее состояние (заглушка)
-        game_state = game.get_state()
-        
-        # Выбираем ход (используем вашу текущую логику)
-        from logic import choose_move
-        move = choose_move(game_state)
-        
-        # Выполняем ход и получаем награду
-        new_state, reward, done = game.step(move)
-        
-        # Собираем данные
-        data = collector.collect_game(
-            game_state, move, reward, game_id, turn
-        )
-        collector.games_data.append(data)
-        
-        total_reward += reward
-        
-        if verbose:
-            print(f"Тур {turn}: ход {move}, награда {reward}")
-        
-        if done:
-            break
-    
-    return total_reward
+def simulate_game(collector: DataCollector, game_state: Dict, move: str,
+                  reward: float, game_id: int, turn: int) -> None:
+    """Собирает данные для одного хода из реального состояния игры."""
+    data = collector.collect_game(game_state, move, reward, game_id, turn)
+    collector.games_data.append(data)
 
 
 # ============================================================
@@ -137,34 +105,59 @@ def simulate_game(collector: DataCollector, game_id: int,
 # ============================================================
 
 def quick_collect(n_games: int = 100, save: bool = True):
-    """Быстрый сбор данных — запускает N игр."""
+    """Быстрый сбор данных — генерирует синтетические данные для тестирования."""
+    import random
+    
     collector = DataCollector()
     
-    print(f"🚀 Запуск {n_games} игр для сбора данных...")
+    print(f"🚀 Генерация {n_games} синтетических игр для тестирования...")
     
-    # В реальности здесь нужно подключить симулятор
-    # Сейчас просто создаём пример данных
+    width, height = 11, 11
     
     for game_id in range(n_games):
-        # Генерируем пример данных (заглушка)
-        game_data = {
-            'game_id': game_id,
-            'turn': 0,
-            'chosen_move': 'up',
-            'reward': 1.0,
-            'legal_moves': ['up', 'down', 'left', 'right'],
-            'features': {
-                'up': {'space_capped': 10, 'open_space': 50, 'voronoi': 20, 'reaches_tail': 1.0, 'escape': 3, 'h2h_danger': 0.0, 'near_bigger_head': 5.0, 'near_enemy_head': 3.0, 'wall_dist': 2.0, 'food_score': 0.0, 'food_delta': 1.0, 'is_food': 0.0, 'dist_to_center': 3.0},
-                'down': {'space_capped': 8, 'open_space': 40, 'voronoi': 15, 'reaches_tail': 0.0, 'escape': 2, 'h2h_danger': 1.0, 'near_bigger_head': 3.0, 'near_enemy_head': 2.0, 'wall_dist': 1.0, 'food_score': 0.0, 'food_delta': 0.5, 'is_food': 0.0, 'dist_to_center': 4.0},
-                'left': {'space_capped': 9, 'open_space': 45, 'voronoi': 18, 'reaches_tail': 0.0, 'escape': 2, 'h2h_danger': 0.0, 'near_bigger_head': 4.0, 'near_enemy_head': 2.5, 'wall_dist': 1.5, 'food_score': 0.0, 'food_delta': 0.0, 'is_food': 0.0, 'dist_to_center': 3.5},
-                'right': {'space_capped': 7, 'open_space': 35, 'voronoi': 12, 'reaches_tail': 0.0, 'escape': 1, 'h2h_danger': 0.0, 'near_bigger_head': 6.0, 'near_enemy_head': 4.0, 'wall_dist': 0.5, 'food_score': 0.0, 'food_delta': -1.0, 'is_food': 0.0, 'dist_to_center': 2.5},
+        # Генерируем случайное состояние игры
+        head_x = random.randint(2, width - 3)
+        head_y = random.randint(2, height - 3)
+        health = random.randint(20, 100)
+        length = random.randint(3, 10)
+        
+        # Создаём синтетическое состояние
+        game_state = {
+            'board': {
+                'width': width,
+                'height': height,
+                'food': [
+                    {'x': random.randint(0, width - 1), 'y': random.randint(0, height - 1)}
+                    for _ in range(3)
+                ],
+                'snakes': [
+                    {
+                        'id': 'us',
+                        'head': {'x': head_x, 'y': head_y},
+                        'body': [
+                            {'x': head_x - i, 'y': head_y} for i in range(length)
+                        ],
+                        'length': length,
+                    }
+                ]
             },
-            'health': 100,
-            'length': 3,
-            'food_count': 5,
-            'enemy_count': 1
+            'you': {
+                'id': 'us',
+                'head': {'x': head_x, 'y': head_y},
+                'body': [
+                    {'x': head_x - i, 'y': head_y} for i in range(length)
+                ],
+                'length': length,
+                'health': health,
+            }
         }
-        collector.games_data.append(game_data)
+        
+        # Выбираем ход
+        move = choose_move_heuristic(game_state)
+        
+        # Собираем данные
+        data = collector.collect_game(game_state, move, 0.0, game_id, 0)
+        collector.games_data.append(data)
         
         if (game_id + 1) % 10 == 0:
             print(f"  Собрано {game_id + 1} игр")

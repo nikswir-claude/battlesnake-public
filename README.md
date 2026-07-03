@@ -12,11 +12,36 @@ Each turn, `logic.py`:
 - Scores each move with a pure-Python linear model.
 - Returns the highest-scoring move.
 
+## Training Pipeline
+
+You can improve the snake by collecting game data and retraining the model:
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Collect data (run real games)
+python experiments/run_games.py --games 50
+
+# 3. Train a new model
+python train.py experiments/data/collected_data.parquet
+
+# 4. Update the embedded model
+python update_model.py model.json
+
+# 5. Test the improved snake
+python backend.py
+```
+
+See [`experiments/README.md`](experiments/README.md) for details.
 
 ## Files
 
-- `backend.py` — Battlesnake HTTP server with `/`, `/start`, `/move`, and `/end`.
+- `backend.py` — Battlesnake HTTP server with `/`, `/start`, `/move`, `/end`, and `/log`.
 - `logic.py` — embedded checkpoint, feature extraction, move scoring, and fallback logic.
+- `train.py` — train a new linear model from collected data.
+- `update_model.py` — update the embedded model in `logic.py`.
+- `experiments/` — data collection and game running scripts.
 - `requirements.txt` — runtime dependencies.
 - `render.yaml` — Render deployment config.
 

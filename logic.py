@@ -13,7 +13,9 @@ Board coordinates: ``(0, 0)`` is the bottom-left corner.
 Game-state schema reference: https://docs.battlesnake.com/api
 """
 
+import json
 from collections import deque
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 Point = Tuple[int, int]
@@ -29,6 +31,8 @@ DIRECTIONS: Dict[str, Point] = {
 HEAD_TO_HEAD_PENALTY = 10_000
 # Below this health we start actively steering toward food.
 HUNGRY_THRESHOLD = 50
+# Minimum space we want to have after moving (safety margin).
+MIN_SAFE_SPACE = 3
 
 
 def get_info() -> Dict[str, str]:
@@ -55,7 +59,7 @@ def choose_move(game_state: Dict) -> str:
 
 
 def choose_move_heuristic(game_state: Dict) -> str:
-    """Return the next move for the current turn."""
+    """Return the next move for the current turn using improved heuristics."""
     board = game_state["board"]
     you = game_state["you"]
     width: int = board["width"]
@@ -68,6 +72,7 @@ def choose_move_heuristic(game_state: Dict) -> str:
     occupied = _occupied_cells(board["snakes"])
     danger = _head_to_head_cells(board["snakes"], you["id"], my_length)
     foods = [(f["x"], f["y"]) for f in board["food"]]
+    enemies = [s for s in board["snakes"] if s["id"] != you["id"]]
 
     best_move = None
     best_score = float("-inf")
@@ -85,20 +90,57 @@ def choose_move_heuristic(game_state: Dict) -> str:
         space = _flood_fill(nxt, occupied, width, height, limit=my_length + 1)
         score = float(space)
 
+        # Hard penalty for head-to-head danger
         if nxt in danger:
             score -= HEAD_TO_HEAD_PENALTY
 
-        # When hungry, nudge toward the closest food.
+        # Avoid moves that leave us with too little space
+        if space < MIN_SAFE_SPACE:
+            score -= 1000
+
+        # When hungry, strongly prefer food
         if foods and health < HUNGRY_THRESHOLD:
             nearest = min(_manhattan(nxt, f) for f in foods)
-            score += (width + height - nearest) * 2
+            score += (width + height - nearest) * 3
+
+        # Bonus for moving toward food even when not hungry (smaller bonus)
+        elif foods:
+            nearest = min(_manhattan(nxt, f) for f in foods)
+            score += (width + height - nearest)
+
+        # Bonus for staying away from enemies
+        if enemies:
+            min_enemy_dist = min(
+                _manhattan(nxt, (s["head"]["x"], s["head"]["y"]))
+                for s in enemies
+            )
+            score += min_enemy_dist * 0.5
+
+        # Bonus for reaching our tail (anti-self-trap)
+        my_tail = (you["body"][-1]["x"], you["body"][-1]["y"])
+        reach = _bfs_dist([nxt], occupied - {my_tail}, width, height)
+        if my_tail in reach:
+            score += 5
+
+        # Bonus for having multiple escape routes
+        escape = sum(
+            1
+            for ddx, ddy in _NEIGHBORS
+            if _in_bounds((nxt[0] + ddx, nxt[1] + ddy), width, height)
+            and (nxt[0] + ddx, nxt[1] + ddy) not in occupied
+        )
+        score += escape * 2
 
         if score > best_score:
             best_score = score
             best_move = move
 
-    # No safe move found -> we're cornered. Move up and hope for the best.
-    return best_move or "up"
+    # No safe move found -> we're cornered. Try any legal move.
+    if best_move is None:
+        legal = _legal_moves(game_state)
+        return legal[0] if legal else "up"
+
+    return best_move
 
 
 def _occupied_cells(snakes: List[Dict]) -> Set[Point]:
@@ -232,6 +274,20 @@ def _candidate_features(state: Dict, move: str) -> Dict[str, float]:
     nearest_next = min((_manhattan(nxt, f) for f in foods), default=_BIG)
     hungry = health < HUNGRY_THRESHOLD
 
+    # Additional features
+    # Number of food cells adjacent to the next position
+    adjacent_food = sum(1 for fx, fy in foods if _manhattan(nxt, (fx, fy)) == 1)
+
+    # Average distance to all enemy heads
+    avg_enemy_dist = (
+        sum(_manhattan(nxt, h) for h in enemy_heads) / len(enemy_heads)
+        if enemy_heads
+        else float(width + height)
+    )
+
+    # Whether we're moving into a narrow corridor (fewer escapes than average)
+    avg_escape = 2.0  # typical escape count
+
     return {
         "space_capped": float(_flood_fill(nxt, occupied, width, height, limit=my_length + 1)),
         "open_space": float(_flood_fill(nxt, occupied, width, height, limit=width * height)),
@@ -246,13 +302,15 @@ def _candidate_features(state: Dict, move: str) -> Dict[str, float]:
         "food_delta": float(nearest_now - nearest_next) if foods else 0.0,
         "is_food": 1.0 if nxt in foods else 0.0,
         "dist_to_center": abs(nxt[0] - (width - 1) / 2) + abs(nxt[1] - (height - 1) / 2),
+        "adjacent_food": float(adjacent_food),
+        "avg_enemy_dist": float(avg_enemy_dist),
     }
 
 
 # --- Model -----------------------------------------------------
-# Embedded standardized linear model.
+# Embedded standardized linear model (fallback if no external model is found).
 
-_MODEL: Dict = {
+_EMBEDDED_MODEL: Dict = {
     "feature_names": [
         "space_capped",
         "open_space",
@@ -267,6 +325,8 @@ _MODEL: Dict = {
         "food_delta",
         "is_food",
         "dist_to_center",
+        "adjacent_food",
+        "avg_enemy_dist",
     ],
     "mean": [
         7.357954545454546,
@@ -282,6 +342,8 @@ _MODEL: Dict = {
         0.14772727272727273,
         0.036931818181818184,
         5.056818181818182,
+        0.1,
+        5.0,
     ],
     "std": [
         3.5995966185276513,
@@ -297,6 +359,8 @@ _MODEL: Dict = {
         0.9449599886584031,
         0.18859442989548575,
         2.34451950177747,
+        0.3,
+        3.0,
     ],
     "coef": [
         0.00010539398521136327,
@@ -312,10 +376,34 @@ _MODEL: Dict = {
         0.12463070008097832,
         0.21036618806863483,
         1.836259515524985,
+        2.0,
+        0.5,
     ],
     "intercept": 0.0,
     "top1_accuracy": 0.9928571428571429,
 }
+
+_MODEL: Optional[Dict] = None
+
+
+def _load_model() -> Dict:
+    """Load model from ``model.json`` if it exists, otherwise use embedded model."""
+    global _MODEL
+    if _MODEL is not None:
+        return _MODEL
+
+    model_path = Path(__file__).parent / "model.json"
+    if model_path.exists():
+        try:
+            with open(model_path, "r") as f:
+                _MODEL = json.load(f)
+            print(f"📦 Loaded model from {model_path} (accuracy={_MODEL.get('top1_accuracy', '?')})")
+            return _MODEL
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  Failed to load model.json: {e}. Using embedded model.")
+
+    _MODEL = _EMBEDDED_MODEL
+    return _MODEL
 
 
 def choose_move_model(game_state: Dict) -> Optional[str]:
@@ -328,11 +416,12 @@ def choose_move_model(game_state: Dict) -> Optional[str]:
     if not legal:
         return None
 
-    names = _MODEL["feature_names"]
-    mean = _MODEL["mean"]
-    std = _MODEL["std"]
-    coef = _MODEL["coef"]
-    intercept = _MODEL["intercept"]
+    model = _load_model()
+    names = model["feature_names"]
+    mean = model["mean"]
+    std = model["std"]
+    coef = model["coef"]
+    intercept = model["intercept"]
 
     best_move, best_score = None, float("-inf")
     for move in legal:
