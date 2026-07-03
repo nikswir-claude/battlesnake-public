@@ -1,0 +1,4 @@
+# Training-only dependencies (NOT needed to serve the bot).
+# Serving uses a pure-Python model (model_py.json); see logic.py.
+numpy>=1.26
+lightgbm>=4.3

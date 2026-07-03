@@ -1,9 +1,11 @@
 """Model-backed move-selection logic for the Battlesnake.
 
-The served policy scores each legal move with a gradient-boosted ranker
-(LightGBM, trained by imitation of a depth-limited minimax expert) and returns
-the highest-scoring direction. A compact flood-fill heuristic remains as a
-fallback so gameplay always returns a legal move if the model is unavailable.
+The served policy scores each legal move with a gradient-boosted ranker and
+returns the highest-scoring direction. The model is exported to a dependency-free
+pure-Python form (``model_py.json``, flattened trees) so serving needs no
+lightgbm/numpy — fast to load, light on memory, safe on a small free instance.
+A flood-fill heuristic remains as a fallback and as a hard per-move deadline
+guard, so a move is always returned well within the game's time limit.
 
 Board coordinates: ``(0, 0)`` is the bottom-left corner.
   up -> y+1, down -> y-1, left -> x-1, right -> x+1
@@ -12,7 +14,9 @@ Feature extraction lives in ``features.py`` and is shared with the training
 pipeline, so the vector scored here is identical to the one trained on.
 """
 
+import json
 import os
+import threading
 from typing import Dict, List, Optional
 
 from features import (
@@ -28,41 +32,43 @@ from features import (
 
 HUNGRY_THRESHOLD = 50
 HEAD_TO_HEAD_PENALTY = 10_000
-_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model.txt")
+MOVE_BUDGET_S = 0.35  # hard per-move compute budget; fall back to heuristic if exceeded
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_py.json")
 
-# The LightGBM booster and numpy are loaded LAZILY, on the first move, not at
-# import. Importing lightgbm/numpy and loading the model is slow on a small free
-# instance; doing it at worker boot made gunicorn miss Render's health check on
-# ``/``. Boot now stays light; ``warmup()`` (called from POST /start, which has
-# no move deadline) primes the model so the first real move is already fast.
-_BOOSTER = None          # loaded model, or None -> heuristic fallback
-_np = None               # cached numpy module
-_LOAD_FAILED = False     # remember a failed/absent load; don't retry every move
+# Pure-Python model: {"names": [...], "trees": [[F,T,L,R,V], ...]}. Loaded lazily.
+_MODEL = None
+_LOAD_FAILED = False
 
 
-def _get_booster():
-    """Load and cache the booster on first use. Returns None on any failure."""
-    global _BOOSTER, _np, _LOAD_FAILED
-    if _BOOSTER is not None or _LOAD_FAILED:
-        return _BOOSTER
+def _get_model():
+    """Load and cache the flattened tree model on first use. None on failure."""
+    global _MODEL, _LOAD_FAILED
+    if _MODEL is not None or _LOAD_FAILED:
+        return _MODEL
     try:
-        import numpy as np
-        import lightgbm as lgb
-
-        if not os.path.exists(_MODEL_PATH):
-            _LOAD_FAILED = True
-            return None
-        _np = np
-        _BOOSTER = lgb.Booster(model_file=_MODEL_PATH)
+        with open(_MODEL_PATH) as f:
+            raw = json.load(f)
+        _MODEL = {"names": raw["feature_names"], "trees": raw["trees"]}
     except Exception:  # noqa: BLE001 - model load must never break the server
         _LOAD_FAILED = True
-        _BOOSTER = None
-    return _BOOSTER
+        _MODEL = None
+    return _MODEL
 
 
 def warmup() -> bool:
     """Best-effort model preload (call from /start). True if the model is ready."""
-    return _get_booster() is not None
+    return _get_model() is not None
+
+
+def _score(fv: List[float], trees) -> float:
+    """Sum of leaf values over all trees for one feature vector (pure Python)."""
+    total = 0.0
+    for F, T, L, R, V in trees:
+        node = 0
+        while F[node] != -1:
+            node = L[node] if fv[F[node]] <= T[node] else R[node]
+        total += V[node]
+    return total
 
 
 def get_info() -> Dict[str, str]:
@@ -73,35 +79,49 @@ def get_info() -> Dict[str, str]:
         "color": "#6434eb",
         "head": "smart-caterpillar",
         "tail": "weight",
-        "version": "0.2.0",
+        "version": "0.3.0",
     }
 
 
 def choose_move(game_state: Dict) -> str:
-    """Return the next move using the model, with a heuristic fallback."""
-    try:
-        move = choose_move_model(game_state)
-    except Exception:  # noqa: BLE001 - a model issue must never break gameplay
-        move = None
-    if move is not None:
-        return move
-    return choose_move_heuristic(game_state)
+    """Return the best move, guaranteed within the per-move budget.
+
+    A fast, always-legal heuristic move is computed first; the model runs under a
+    wall-clock budget in a worker thread. If the model finishes in time we use it,
+    otherwise we return the heuristic move — so we never blow the game deadline.
+    """
+    safe = choose_move_heuristic(game_state)
+    box: Dict[str, Optional[str]] = {}
+
+    def _run():
+        try:
+            box["m"] = choose_move_model(game_state)
+        except Exception:  # noqa: BLE001 - a model issue must never break gameplay
+            box["m"] = None
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(MOVE_BUDGET_S)
+    return box.get("m") or safe
 
 
 def choose_move_model(game_state: Dict) -> Optional[str]:
     """Score each legal move with the GBDT; return the best. None if unavailable."""
-    booster = _get_booster()
-    if booster is None:
+    model = _get_model()
+    if model is None:
         return None
     legal = _legal_moves(game_state)
     if not legal:
         return None
-    matrix = _np.array(
-        [[candidate_features(game_state, m)[n] for n in FEATURE_NAMES] for m in legal],
-        dtype=_np.float32,
-    )
-    scores = booster.predict(matrix)
-    return legal[int(_np.argmax(scores))]
+    names, trees = model["names"], model["trees"]
+    best_move, best_score = None, float("-inf")
+    for move in legal:
+        feats = candidate_features(game_state, move)
+        fv = [feats[n] for n in names]
+        s = _score(fv, trees)
+        if s > best_score:
+            best_score, best_move = s, move
+    return best_move
 
 
 def choose_move_heuristic(game_state: Dict) -> str:
