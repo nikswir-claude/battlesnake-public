@@ -4,7 +4,7 @@
 # build/start commands below.
 services:
   - type: web
-    name: battlesnake-ml
+    name: battlesnake-ml-ong
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
