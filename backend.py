@@ -7,12 +7,18 @@ Implements the four endpoints the Battlesnake game engine calls:
   POST /end     -> a game has ended
 """
 
+import importlib
 import logging
 import os
 
 from flask import Flask, request
 
-from logic import choose_move, get_info
+# Which logic module to serve. Defaults to ``logic`` (unchanged behavior); set
+# LOGIC_MODULE to A/B-test an alternate implementation (e.g. ``logic_tailaware``)
+# without touching this file.
+_logic = importlib.import_module(os.environ.get("LOGIC_MODULE", "logic"))
+choose_move = _logic.choose_move
+get_info = _logic.get_info
 
 app = Flask("battlesnake")
 

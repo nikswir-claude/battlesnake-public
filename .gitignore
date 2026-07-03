@@ -7,3 +7,9 @@ venv/
 
 # Local Battlesnake CLI output
 logs/
+
+# Local artifacts (not code)
+*.exe
+*.log
+tools/_smoketest.json
+initial commit.txt
