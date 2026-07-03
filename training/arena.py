@@ -20,9 +20,31 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import features  # noqa: E402
 import sim        # noqa: E402
+import expert     # noqa: E402
 from train import _LINEAR  # noqa: E402
 
 _LIN_IDX = None
+
+
+def _api_to_sim(api):
+    """Rebuild an internal sim state from an api game_state (for the minimax bot)."""
+    board = api["board"]
+    snakes = []
+    for s in board["snakes"]:
+        body = [(p["x"], p["y"]) for p in s["body"]]
+        snakes.append({"id": s["id"], "health": s["health"], "body": body,
+                       "alive": True, "ate": False})
+    food = [(f["x"], f["y"]) for f in board["food"]]
+    return sim.make_state(board["width"], board["height"], snakes, food, api.get("turn", 0))
+
+
+def make_minimax_bot(depth):
+    """A real search bot (our teacher) as an arena opponent."""
+    def bot(api):
+        state = _api_to_sim(api)
+        mv, _ = expert.expert_move(state, api["you"]["id"], depth=depth)
+        return mv or "up"
+    return bot
 
 
 def make_gbdt_bot(model_path):
@@ -119,6 +141,8 @@ def _init_worker(model_path):
     _BOTS["GBDT"] = make_gbdt_bot(model_path)
     _BOTS["linear"] = linear_bot
     _BOTS["heuristic"] = heuristic_bot
+    _BOTS["minimax2"] = make_minimax_bot(2)
+    _BOTS["minimax3"] = make_minimax_bot(3)
 
 
 def _play_one(task):
@@ -146,17 +170,44 @@ def match(name_a, name_b, games, pool):
     return wr
 
 
+def round_robin(bots, games, pool):
+    """Every bot vs every other; print a ranking by overall win rate."""
+    import itertools
+    wr_sum = {b: 0.0 for b in bots}
+    n = {b: 0 for b in bots}
+    for a, b in itertools.combinations(bots, 2):
+        wr = match(a, b, games, pool)
+        wr_sum[a] += wr
+        wr_sum[b] += 1 - wr
+        n[a] += 1
+        n[b] += 1
+    print("\n=== RANKING (avg win rate across opponents) ===")
+    ranking = sorted(bots, key=lambda x: -wr_sum[x] / max(n[x], 1))
+    for i, b in enumerate(ranking, 1):
+        print(f"  {i}. {b:10s} {100 * wr_sum[b] / max(n[b], 1):5.1f}%")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--games", type=int, default=60)
     ap.add_argument("--model", default=os.path.join(os.path.dirname(os.path.dirname(__file__)), "model.txt"))
     ap.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 1))
+    ap.add_argument("--minimax", action="store_true", help="benchmark vs the minimax search bot")
+    ap.add_argument("--roundrobin", action="store_true", help="full round-robin tournament + ranking")
+    ap.add_argument("--bots", default="heuristic,linear,GBDT,minimax2,minimax3")
     args = ap.parse_args()
     print(f"[arena] {args.games} games per matchup, {args.workers} workers\n")
     with Pool(args.workers, initializer=_init_worker, initargs=(args.model,)) as pool:
-        match("GBDT", "linear", args.games, pool)
-        match("GBDT", "heuristic", args.games, pool)
-        match("linear", "heuristic", args.games, pool)
+        if args.roundrobin:
+            round_robin([b.strip() for b in args.bots.split(",")], args.games, pool)
+        elif args.minimax:
+            match("GBDT", "minimax2", args.games, pool)
+            match("GBDT", "minimax3", args.games, pool)
+            match("linear", "minimax2", args.games, pool)
+        else:
+            match("GBDT", "linear", args.games, pool)
+            match("GBDT", "heuristic", args.games, pool)
+            match("linear", "heuristic", args.games, pool)
 
 
 if __name__ == "__main__":
