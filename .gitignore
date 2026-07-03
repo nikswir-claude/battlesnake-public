@@ -11,7 +11,8 @@ logs/
 # Local artifacts (not code)
 *.exe
 *.log
-tools/_smoketest.json
+tools/_*.json
+tools/_*.jsonl
 initial commit.txt
 CLAUDE.md
 TASK_CONTEXT.md
